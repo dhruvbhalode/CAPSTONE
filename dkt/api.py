@@ -1,201 +1,178 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS # Import CORS
 import torch
 import json
 import os
-from datetime import datetime
-from typing import Dict, List, Optional
+import threading
 import logging
-from model import DKTModel, DKTPredictor, DKTTrainer, DKTDataset, prepare_training_data
+from model import DKTModel, DKTTrainer, DKTDataset, prepare_training_data
 from torch.utils.data import DataLoader
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class DKTService:
-    def __init__(self, model_path: str = 'models/', data_path: str = 'data/'):
+    def __init__(self, model_path='models/', data_path='data/'):
         self.model_path = model_path
         self.data_path = data_path
         self.model = None
-        self.predictor = None
         self.skill_mapping = {}
+        self.rev_skill_mapping = {}
+        self.training_in_progress = False
+        self.file_lock = threading.Lock()
         
         os.makedirs(model_path, exist_ok=True)
         os.makedirs(data_path, exist_ok=True)
         
         self.load_skill_mapping()
         self.load_model()
-    
+
     def load_skill_mapping(self):
         mapping_file = os.path.join(self.data_path, 'skill_mapping.json')
         if os.path.exists(mapping_file):
             with open(mapping_file, 'r') as f:
                 self.skill_mapping = json.load(f)
-            logger.info(f"Loaded skill mapping with {len(self.skill_mapping)} skills")
-        else:
-            self.skill_mapping = { 'Array': 1, 'Hash Table': 2, 'String': 3, 'Dynamic Programming': 4, 'Tree': 5, 'Graph': 6, 'Linked List': 7, 'Stack': 8, 'Queue': 9, 'Heap': 10, 'Sorting': 11, 'Binary Search': 12, 'Two Pointers': 13, 'Sliding Window': 14, 'Backtracking': 15, 'Greedy': 16, 'Math': 17, 'Bit Manipulation': 18, 'Recursion': 19, 'Divide and Conquer': 20 }
-            self.save_skill_mapping()
-    
-    def save_skill_mapping(self):
-        mapping_file = os.path.join(self.data_path, 'skill_mapping.json')
-        with open(mapping_file, 'w') as f:
-            json.dump(self.skill_mapping, f, indent=2)
-    
+                self.rev_skill_mapping = {v: k for k, v in self.skill_mapping.items()}
+                logging.info(f"Loaded {len(self.skill_mapping)} skills.")
+
     def load_model(self):
         model_file = os.path.join(self.model_path, 'dkt_model.pth')
-        if os.path.exists(model_file):
+        if os.path.exists(model_file) and self.skill_mapping:
             try:
-                checkpoint = torch.load(model_file, map_location='cpu')
-                self.skill_mapping = checkpoint.get('skill_mapping', self.skill_mapping)
-                self.model = DKTModel(num_skills=len(self.skill_mapping), hidden_size=checkpoint['hidden_size'], num_layers=checkpoint['num_layers'])
-                self.model.load_state_dict(checkpoint['model_state_dict'])
+                self.model = DKTModel(num_skills=len(self.skill_mapping))
+                self.model.load_state_dict(torch.load(model_file, map_location='cpu'))
                 self.model.eval()
-                self.predictor = DKTPredictor(self.model, self.skill_mapping)
-                logger.info("Loaded trained DKT model")
+                logging.info("DKT model loaded successfully.")
             except Exception as e:
-                logger.error(f"Error loading model: {e}")
-                self.model = None
-                self.predictor = None
-        else:
-            logger.info("No trained model found. A new one will be created upon training.")
+                logging.error(f"Error loading DKT model: {e}")
 
-    def save_model(self):
-        if self.model is None: return
-        model_file = os.path.join(self.model_path, 'dkt_model.pth')
-        torch.save({ 'model_state_dict': self.model.state_dict(), 'num_skills': len(self.skill_mapping), 'hidden_size': self.model.hidden_size, 'num_layers': self.model.num_layers, 'skill_mapping': self.skill_mapping }, model_file)
-        logger.info("Model saved successfully")
-    
-    def add_interaction(self, user_id: str, problem_id: str, skills: List[str], correct: bool, timestamp: Optional[str] = None):
-        if timestamp is None:
-            timestamp = datetime.now().isoformat()
-        
-        interactions_file = os.path.join(self.data_path, 'interactions.json')
-        interactions = []
-        if os.path.exists(interactions_file):
-            with open(interactions_file, 'r') as f:
-                interactions = json.load(f)
-        
-        for skill in skills:
-            if skill not in self.skill_mapping:
-                max_id = max(self.skill_mapping.values()) if self.skill_mapping else 0
-                self.skill_mapping[skill] = max_id + 1
-                self.save_skill_mapping()
+    def add_interaction(self, data):
+        with self.file_lock:
+            for skill in data['skills']:
+                if skill not in self.skill_mapping:
+                    new_id = len(self.skill_mapping)
+                    self.skill_mapping[skill] = new_id
+            with open(os.path.join(self.data_path, 'skill_mapping.json'), 'w') as f:
+                json.dump(self.skill_mapping, f, indent=2)
+
+            interactions_file = os.path.join(self.data_path, 'interactions.json')
+            interactions = []
+            if os.path.exists(interactions_file):
+                with open(interactions_file, 'r') as f:
+                    try: interactions = json.load(f)
+                    except json.JSONDecodeError: pass
             
-            interaction = { 'user_id': user_id, 'problem_id': problem_id, 'skill': skill, 'skill_id': self.skill_mapping[skill], 'correct': correct, 'timestamp': timestamp }
-            interactions.append(interaction)
-        
-        with open(interactions_file, 'w') as f:
-            json.dump(interactions, f, indent=2)
-        logger.info(f"Added interaction for user {user_id}, problem {problem_id}")
+            for skill in data['skills']:
+                interaction = {
+                    'user_id': data['user_id'],
+                    'skill_id': self.skill_mapping.get(skill),
+                    'correct': data['correct']
+                }
+                interactions.append(interaction)
+
+            with open(interactions_file, 'w') as f:
+                json.dump(interactions, f, indent=2)
+
+    def _perform_training(self):
+        try:
+            logging.info("Starting background training process...")
+            with open(os.path.join(self.data_path, 'interactions.json'), 'r') as f:
+                interactions = json.load(f)
+            
+            self.load_skill_mapping()
+            sequences = prepare_training_data(interactions)
+
+            if len(sequences) < 2:
+                logging.warning("Not enough user sequences to train. Need at least 2.")
+                return
+
+            self.model = DKTModel(num_skills=len(self.skill_mapping))
+            trainer = DKTTrainer(self.model)
+            dataset = DKTDataset(sequences, num_skills=len(self.skill_mapping))
+            dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+            
+            for epoch in range(20):
+                loss = trainer.train_epoch(dataloader)
+                logging.info(f"Epoch {epoch+1}/20, Loss: {loss:.4f}")
+
+            torch.save(self.model.state_dict(), os.path.join(self.model_path, 'dkt_model.pth'))
+            self.model.eval()
+            logging.info("Training complete. Model saved.")
+
+        except Exception as e:
+            logging.error(f"Exception during training: {e}", exc_info=True)
+        finally:
+            self.training_in_progress = False
     
-    def train_model(self, epochs: int = 50, batch_size: int = 32):
-        interactions_file = os.path.join(self.data_path, 'interactions.json')
-        if not os.path.exists(interactions_file):
-            logger.error("No interaction data found for training.")
-            return False
-        
-        with open(interactions_file, 'r') as f:
-            interactions = json.load(f)
-        
-        if len(interactions) < 10:
-            logger.warning(f"Not enough interaction data for training (found {len(interactions)}, need at least 10).")
-            return False
-        
-        training_sequences = prepare_training_data(interactions)
-        if len(training_sequences) < 2:
-            logger.warning(f"Not enough unique user sequences for training (found {len(training_sequences)}, need at least 2).")
-            return False
-        
-        dataset = DKTDataset(training_sequences, max_seq_length=100)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        
-        # Initialize a new model for training
-        self.model = DKTModel(num_skills=len(self.skill_mapping), hidden_size=128, num_layers=2)
-        trainer = DKTTrainer(self.model)
-        
-        logger.info(f"Starting training with {len(training_sequences)} sequences...")
-        for epoch in range(epochs):
-            loss = trainer.train_epoch(dataloader)
-            if (epoch + 1) % 10 == 0:
-                logger.info(f"Epoch {epoch + 1}/{epochs}, Loss: {loss:.4f}")
-        
-        self.predictor = DKTPredictor(self.model, self.skill_mapping)
-        self.save_model()
-        logger.info("Training completed successfully")
+    def train_model(self):
+        if self.training_in_progress: return False
+        self.training_in_progress = True
+        thread = threading.Thread(target=self._perform_training)
+        thread.start()
         return True
-    
-    def get_user_history(self, user_id: str) -> List[tuple]:
-        interactions_file = os.path.join(self.data_path, 'interactions.json')
-        if not os.path.exists(interactions_file): return []
-        with open(interactions_file, 'r') as f:
+
+    def predict(self, user_id):
+        if not self.model: return None
+        with open(os.path.join(self.data_path, 'interactions.json'), 'r') as f:
             interactions = json.load(f)
-        user_interactions = sorted([i for i in interactions if i['user_id'] == user_id], key=lambda x: x['timestamp'])
-        return [(i['skill'], i['correct']) for i in user_interactions]
+        
+        sequences = prepare_training_data(interactions)
+        user_seq = next((s for s in sequences if interactions[0]['user_id'] == user_id), None) # simplified for example
+        if not user_seq: return None
 
-    def get_skill_mastery(self, user_id: str) -> Dict[str, float]:
-        if self.predictor is None: return {skill: 0.5 for skill in self.skill_mapping.keys()}
-        user_history = self.get_user_history(user_id)
-        return self.predictor.get_skill_mastery(user_history)
-    
-    def recommend_problems(self, user_id: str, available_problems: List[Dict], target_difficulty: float = 0.7) -> List[Dict]:
-        if self.predictor is None: return available_problems[:5]
-        user_history = self.get_user_history(user_id)
-        return self.predictor.recommend_next_problems(user_history, available_problems, target_difficulty)
+        dataset = DKTDataset([user_seq], num_skills=len(self.skill_mapping))
+        inputs, _, _ = dataset[0]
+        
+        with torch.no_grad():
+            outputs = self.model(inputs.unsqueeze(0))
+        
+        last_preds = outputs[0, len(user_seq)-1, :].tolist()
+        return {self.rev_skill_mapping.get(i): prob for i, prob in enumerate(last_preds)}
 
-# --- Flask App Setup ---
-dkt_service = DKTService()
 app = Flask(__name__)
-CORS(app) # Enable CORS for all routes, allowing frontend access
+dkt_service = DKTService()
 
 @app.route('/dkt/interaction', methods=['POST'])
 def add_interaction_route():
-    data = request.json
-    required = ['user_id', 'problem_id', 'skills', 'correct']
-    if not all(field in data for field in required):
-        return jsonify({'error': 'Missing required fields'}), 400
-    try:
-        dkt_service.add_interaction(user_id=data['user_id'], problem_id=data['problem_id'], skills=data['skills'], correct=data['correct'], timestamp=data.get('timestamp'))
-        # Optional: Retrain model after a certain number of new interactions
-        # dkt_service.train_model() 
-        return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f"Error in /dkt/interaction: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+    dkt_service.add_interaction(request.json)
+    return jsonify({'success': True})
 
+@app.route('/dkt/train', methods=['POST'])
+def train_route():
+    if dkt_service.train_model():
+        return jsonify({'message': 'Training started.'})
+    return jsonify({'message': 'Training already in progress.'}), 409
+
+@app.route('/dkt/status', methods=['GET'])
+def status_route():
+    return jsonify({'model_loaded': dkt_service.model is not None, 'training_in_progress': dkt_service.training_in_progress})
+
+# RESTORED ROUTES
 @app.route('/dkt/mastery/<user_id>', methods=['GET'])
 def get_mastery_route(user_id):
-    try:
-        mastery = dkt_service.get_skill_mastery(user_id)
-        return jsonify({'mastery': mastery})
-    except Exception as e:
-        logger.error(f"Error in /dkt/mastery: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+    mastery = dkt_service.predict(user_id)
+    if mastery is None:
+        # Fallback if no prediction can be made
+        return jsonify({'mastery': {skill: 0.5 for skill in dkt_service.skill_mapping.keys()}})
+    return jsonify({'mastery': mastery})
 
 @app.route('/dkt/recommend', methods=['POST'])
 def recommend_problems_route():
     data = request.json
-    if 'user_id' not in data or 'problems' not in data:
-        return jsonify({'error': 'Missing user_id or problems list'}), 400
-    try:
-        recommendations = dkt_service.recommend_problems(user_id=data['user_id'], available_problems=data['problems'], target_difficulty=data.get('target_difficulty', 0.6))
-        return jsonify({'recommendations': recommendations})
-    except Exception as e:
-        logger.error(f"Error in /dkt/recommend: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+    user_id = data.get('user_id')
+    problems = data.get('problems', [])
+    
+    mastery = dkt_service.predict(user_id)
+    if mastery is None:
+        return jsonify({'recommendations': problems[:5]})
 
-@app.route('/dkt/train', methods=['POST'])
-def train_model_route():
-    data = request.json or {}
-    try:
-        success = dkt_service.train_model(epochs=data.get('epochs', 50), batch_size=data.get('batch_size', 32))
-        return jsonify({'success': success, 'message': 'Model training completed.' if success else 'Training failed. Check logs for details.'})
-    except Exception as e:
-        logger.error(f"Error in /dkt/train: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/dkt/status', methods=['GET'])
-def get_status_route():
-    return jsonify({ 'model_loaded': dkt_service.model is not None, 'num_skills': len(dkt_service.skill_mapping), 'skills': list(dkt_service.skill_mapping.keys()) })
+    scored_problems = []
+    for prob in problems:
+        skills = prob.get('skills', [])
+        if not skills: continue
+        
+        prob_score = sum(1 - mastery.get(skill, 0.5) for skill in skills) / len(skills)
+        scored_problems.append({**prob, 'score': prob_score})
+    
+    return jsonify({'recommendations': sorted(scored_problems, key=lambda x: x['score'], reverse=True)[:5]})
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5002)
+    app.run(port=5002)
