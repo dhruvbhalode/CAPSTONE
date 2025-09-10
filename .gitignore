@@ -23,3 +23,9 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# python dir
+dkt_env/
+dkt/data/
+dkt/models/
+__pychache__/

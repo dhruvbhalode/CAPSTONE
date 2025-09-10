@@ -13,7 +13,7 @@ function AppContent() {
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <p className="text-white text-lg">Loading...</p>
+        <div className="text-white text-lg">Loading Application...</div>
       </div>
     );
   }
@@ -26,18 +26,20 @@ function AppContent() {
           element={
             <div className="min-h-screen bg-gray-900">
               <Navigation />
-              <Routes>
-                <Route path="/dashboard" element={<Dashboard />} />
-                <Route path="/solve/:problemId" element={<ProblemSolver />} />
-                <Route path="*" element={<Navigate to="/dashboard" />} />
-              </Routes>
+              <main>
+                <Routes>
+                  <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="/solve/:problemId" element={<ProblemSolver />} />
+                  <Route path="*" element={<Navigate to="/dashboard" />} />
+                </Routes>
+              </main>
             </div>
           }
         />
       ) : (
         <>
-          <Route path="/" element={<LoginPage />} />
-          <Route path="*" element={<Navigate to="/" />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="*" element={<Navigate to="/login" />} />
         </>
       )}
     </Routes>
